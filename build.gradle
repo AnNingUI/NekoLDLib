@@ -1,0 +1,299 @@
+plugins {
+    id 'java-library'
+    id 'idea'
+    id 'net.neoforged.moddev' version '2.0.140'
+}
+
+version = mod_version
+group = mod_group_id
+
+java.toolchain.languageVersion = JavaLanguageVersion.of(25)
+
+// 开发期专用依赖配置：只出现在本项目的运行时 classpath 上，不参与发布元数据。
+// ModDevGradle 不提供 localRuntime/localImplementation，需要自行声明。
+configurations {
+    localRuntime
+    runtimeClasspath.extendsFrom localRuntime
+}
+
+// ---------------------------------------------------------------------------
+// 依赖
+//
+// 两个上游都没有"给插件作者的稳定 artifact"，所以这里刻意区分：
+//   - LDLib2 发布到 firstdark maven，走正常坐标。注意 artifact 名用的是
+//     MC 短版本（ldlib2-neoforge-26.1），不是 minecraft_version（26.1.2）。
+//   - NekoJS 无 maven 发布（wiki/插件开发.md 明确说插件编译依赖平台 fat jar），
+//     开发期指向本地仓库构建产物。构建方式见 README。
+//     上游发布 artifact 后，把 nekojsJar 换成正常坐标即可。
+// ---------------------------------------------------------------------------
+
+def ldlib2Artifact = "ldlib2-neoforge-${ldlib2_mc_short}"
+
+def nekojsJar = file("../NekoJS/platforms/neoforge-26.1/build/libs/" +
+        "nekojs-neoforge-${minecraft_version}-${nekojs_version}.jar")
+
+repositories {
+    mavenCentral()
+    // LDLib2
+    maven { url = "https://maven.firstdark.dev/snapshots" }
+    // Graal 前置（curse.maven:graal-1504336）
+    exclusiveContent {
+        forRepository { maven { url = "https://cursemaven.com" } }
+        filter { includeGroup "curse.maven" }
+    }
+}
+
+dependencies {
+    // Graal —— NekoJS 的运行时前置，也是 JSX/脚本值类型（Value/Context）的来源。
+    // 注意包名已被重定位成 graal.graalvm.polyglot（而非原生的 org.graalvm.polyglot），
+    // 这是 NekoJS 消费该依赖的既定形态，本 mod 沿用同一套 import。
+    // 发布时只 compileOnly（Graal 是独立 mod，由玩家安装）；开发环境需要真实加载。
+    compileOnly "curse.maven:graal-1504336:${graal_version}"
+    localRuntime "curse.maven:graal-1504336:${graal_version}"
+
+    // LDLib2：开发环境需要真实加载（localRuntime），编译期 compileOnly
+    compileOnly "com.lowdragmc.ldlib2:${ldlib2Artifact}:${ldlib2_version}"
+    localRuntime "com.lowdragmc.ldlib2:${ldlib2Artifact}:${ldlib2_version}"
+
+    // NekoJS：同上。缺失时给出可操作的报错，而不是让编译期抛一堆 unresolved symbol
+    if (nekojsJar.exists()) {
+        compileOnly files(nekojsJar)
+        localRuntime files(nekojsJar)
+    } else {
+        logger.lifecycle("""
+            [NekoLDLib] 未找到 NekoJS 构建产物：${nekojsJar}
+            请先构建上游（在 NekoJS 仓库根目录）：
+                gradlew :platforms:neoforge-26.1:build -x test
+            然后重新执行本项目的 gradle 任务。
+            """.stripIndent())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Mod 元数据（模板 + 属性替换）
+// ---------------------------------------------------------------------------
+
+var generateModMetadata = tasks.register("generateModMetadata", ProcessResources) {
+    var replaceProperties = [
+            minecraft_version      : minecraft_version,
+            minecraft_version_range: minecraft_version_range,
+            neo_version            : neo_version,
+            neo_version_range      : neo_version_range,
+            loader_version_range   : loader_version_range,
+            graal_version_range    : graal_version_range,
+            mod_id                 : mod_id,
+            mod_name               : mod_name,
+            mod_license            : mod_license,
+            mod_version            : mod_version,
+            mod_authors            : mod_authors,
+            mod_description        : mod_description,
+            ldlib2_version         : ldlib2_version,
+    ]
+    inputs.properties replaceProperties
+    expand replaceProperties
+    from "src/main/templates"
+    into "build/generated/sources/modMetadata"
+}
+
+sourceSets.main.resources.srcDir generateModMetadata
+neoForge.ideSyncTask generateModMetadata
+
+// ---------------------------------------------------------------------------
+// NeoForge / 运行配置
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// 开发用脚本同步
+//
+// examples/ 是脚本的源码位置（会进版本库），run/nekojs/ 是运行时的实际位置
+// （run/ 在 .gitignore 里，不进版本库）。手工复制两边很容易忘记同步，
+// 所以让所有 run 任务都自动先同步一遍。
+//
+// 只用 Sync 的复制语义、不删多余文件：run/nekojs 里还有 NekoJS 自己生成的东西
+// （node_modules、config、README 等），全量 Mirror 会误删。
+// ---------------------------------------------------------------------------
+
+var syncExampleScripts = tasks.register("syncExampleScripts", Copy) {
+    description = '把 examples/ 下的脚本同步到 run/nekojs/，供开发时直接运行'
+    group = 'nekolib'
+
+    // examples/<类型>_scripts/ 下的脚本按目录归位到 run/nekojs/<类型>_scripts/
+    ['client_scripts', 'server_scripts', 'test_scripts', 'startup_scripts'].each { dir ->
+        var src = file("examples/$dir")
+        if (src.exists()) {
+            from(src) {
+                include '*.jsx', '*.tsx', '*.ts', '*.js'
+                into dir
+            }
+        }
+    }
+    // examples/ 根下的散装脚本放 test_scripts —— 那里最适合手动触发试验
+    from('examples') {
+        include '*.jsx', '*.tsx', '*.ts', '*.js'
+        into 'test_scripts'
+    }
+    into file('run/nekojs')
+
+    // 删除目标目录里"源侧已不存在"的脚本。
+    //
+    // 只用 Copy 的话，改名（如 .jsx → .tsx）会留下旧文件——两个都被执行，出现重复运行
+    // 或同名 id 冲突。这里只针对脚本扩展名删，绝不碰 NekoJS 自己生成的东西
+    // （src/、jsconfig.json、node_modules、config、logs…）。
+    doLast {
+        ['client_scripts', 'server_scripts', 'test_scripts', 'startup_scripts'].each { dir ->
+            var srcDir = file("examples/$dir")
+            var dstDir = file("run/nekojs/$dir")
+            if (!dstDir.isDirectory()) {
+                return
+            }
+            var sourceNames = srcDir.isDirectory()
+                    ? (srcDir.listFiles() ?: [] as File[]).collect { it.name } as Set
+                    : ([] as Set)
+            (dstDir.listFiles() ?: [] as File[]).each { f ->
+                if (f.isFile() && isScriptName(f.name) && !sourceNames.contains(f.name)) {
+                    logger.lifecycle("[NekoLDLib] 清理已移除的脚本：{}/{}", dir, f.name)
+                    f.delete()
+                }
+            }
+        }
+    }
+}
+
+/** 是否是脚本文件（按扩展名判断）。 */
+static boolean isScriptName(String name) {
+    return name.endsWith('.jsx') || name.endsWith('.tsx')
+            || name.endsWith('.ts') || name.endsWith('.js')
+}
+
+// ---------------------------------------------------------------------------
+// tsconfig.json —— 给 .tsx 脚本用的编辑器配置
+//
+// NekoJS 只生成 jsconfig.json（WorkspaceGenerator 里写死这个名字），而 VSCode 对
+// .ts / .tsx 优先找 tsconfig.json，找不到时才退回 jsconfig.json。
+//
+// 所以这里生成一个 tsconfig.json，但**必须用 extends 继承 jsconfig.json**：
+// NekoJS 的 probe 会把 java:* / @side-only/* 的路径映射写进 jsconfig
+// （TypeScriptProbeBackend.mergeJsConfigPaths），若另起一份独立的 tsconfig，
+// 那些映射会全部失效 —— import { $Player } from "java:..." 立刻报找不到模块。
+//
+// 因为只是 extends + 少量补充，NekoJS 每次更新 jsconfig 后这里都自动跟随，
+// 不需要手工同步内容。
+// ---------------------------------------------------------------------------
+
+var syncTsConfig = tasks.register("syncTsConfig") {
+    description = '为各脚本目录生成 tsconfig.json（extends jsconfig.json），供 .tsx 编辑器使用'
+    group = 'nekolib'
+
+    // runDir 在配置期可能还不存在（首次运行前），所以用 provider 延迟到执行期判断
+    var scriptDirs = ['client_scripts', 'server_scripts', 'test_scripts', 'startup_scripts']
+
+    doLast {
+        scriptDirs.each { dir ->
+            var jsconfig = file("run/nekojs/$dir/jsconfig.json")
+            if (!jsconfig.exists()) {
+                return
+            }
+            var tsconfig = file("run/nekojs/$dir/tsconfig.json")
+            // 内容里只放"继承 + 补充"，不复制 jsconfig 的内容——
+            // 复制出来的副本会与 NekoJS 的自动更新脱节。
+            var content = '''{
+  // 由 NekoLDLib 的 syncTsConfig 任务生成，供 .tsx 脚本的编辑器使用。
+  // 内容刻意保持极薄：真正的配置都在 jsconfig.json 里（含 NekoJS 生成的
+  // java:* / @side-only/* 路径映射），这里只做继承 + 少量补充。
+  //
+  // 为什么需要它：VSCode 对 .ts/.tsx 优先找 tsconfig.json，没有才退回 jsconfig.json。
+  // 用 extends 而不是另起一份完整配置，是为了不脱离 NekoJS 的自动更新。
+  "extends": "./jsconfig.json",
+  "compilerOptions": {
+    // 脚本是"宿主提供全局 + 松散写法"的形态，不是生产 TS 工程。
+    // 关掉 noImplicitAny：否则每个没写类型标注的函数参数都报 TS7006，
+    // 而**补上标注**会让 NekoJS 的 TS 擦除器崩溃——实测两类标注都会：
+    //   fn: () => unknown           → SyntaxError: Expected an operand but found =>
+    //   props: { tag?: string }     → SyntaxError: Expected , but found :
+    // 那个报错发生在脚本执行期，整个脚本静默不跑，比少几个类型提示严重得多。
+    // 所以正确做法是调低检查强度，而不是给脚本加标注。
+    "allowJs": true,
+    "checkJs": false,
+    "noImplicitAny": false
+  }
+}
+'''
+            var existing = tsconfig.exists() ? tsconfig.text : null
+            if (existing != content) {
+                tsconfig.text = content
+                logger.lifecycle("[NekoLDLib] 写入 {}", tsconfig)
+            }
+        }
+    }
+}
+
+// 所有 run 任务执行前都先同步脚本与编辑器配置，避免"改了源码忘了复制"
+tasks.matching { it.name.startsWith('run') }.configureEach {
+    dependsOn(syncExampleScripts)
+    dependsOn(syncTsConfig)
+}
+
+neoForge {
+    version = neo_version
+
+    runs {
+        client {
+            client()
+            systemProperty 'neoforge.enabledGameTestNamespaces', project.mod_id
+        }
+        // 自动进单人世界的开发运行配置：用于无需人工操作地验证服务端开 UI / 跨端同步。
+        // 用法：gradlew runClientAuto   （存档名见 gradle.properties 的 quickPlayWorld）
+        //
+        // 参数按引号感知的方式拆分：存档名可能带空格（"New World"），简单的 split(' ')
+        // 会把它拆成两个参数，导致游戏收到残缺路径并以 "找不到 'D:\...\MC'" 之类的
+        // 错误退出——这个坑真踩过。
+        clientAuto {
+            client()
+            systemProperty 'neoforge.enabledGameTestNamespaces', project.mod_id
+            // 存档名走 gradle.properties 的 quickPlayWorld（默认 "New World"），
+            // 不走命令行 -P：把带空格的属性值从 shell 传进 gradlew.bat 会踩两层坑——
+            //   bash：路径在空格处被截断（报找不到 'D:\Dev-Project\MC'）
+            //   PowerShell：值被当成任务名（报 Task 'World' not found）
+            // 写进属性文件就都绕开了。存档名含空格是常见情况，不值得为它折腾转义。
+            programArgument '--quickPlaySingleplayer'
+            programArgument(project.findProperty('quickPlayWorld') ?: 'New World')
+        }
+        server {
+            server()
+            programArgument '--nogui'
+            systemProperty 'neoforge.enabledGameTestNamespaces', project.mod_id
+        }
+        configureEach {
+            logLevel = org.slf4j.event.Level.DEBUG
+        }
+    }
+
+    mods {
+        "${mod_id}" {
+            sourceSet(sourceSets.main)
+        }
+    }
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+    options.compilerArgs += '-Xlint:-processing'
+}
+
+tasks.named('jar', Jar).configure {
+    manifest {
+        attributes(['Specification-Title'   : mod_id,
+                    'Specification-Vendor'  : mod_authors,
+                    'Specification-Version' : '1',
+                    'Implementation-Title'  : mod_name,
+                    'Implementation-Version': mod_version,
+                    'Implementation-Vendor' : mod_authors])
+    }
+}
+
+idea {
+    module {
+        downloadSources = true
+        downloadJavadoc = true
+    }
+}
