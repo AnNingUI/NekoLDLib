@@ -318,7 +318,7 @@ NekoJS 的 probe 会把它落进 `.neko_probe/typescript/@manual/index.d.ts`
 
 ### 方法签名的类型也是具体的
 
-`@package/com/tkisor/nekoldlib/` 下的声明里，参数与返回类型都是**具体类型而非 `$Value`**：
+`@package/com/anningui/nekoldlib/` 下的声明里，参数与返回类型都是**具体类型而非 `$Value`**：
 
 ```typescript
 // client/index.d.ts
