@@ -1,7 +1,6 @@
 package com.anningui.nekoldlib.signal;
 
 import com.lowdragmc.lowdraglib2.gui.sync.rpc.RPCEventBuilder;
-import com.tkisor.nekojs.api.annotation.NekoProbe;
 import com.anningui.nekoldlib.NekoLDLib;
 import org.jetbrains.annotations.Nullable;
 
@@ -25,7 +24,7 @@ import java.util.Map;
  *
  * echo.send({ msg: 'hi' })          // 注意：send 也收对象，键名与 schema 对应
  *
- * // 无返回：写 returns('void')（省略会让声明层的 fn 门禁拒掉，见 @NekoProbe 的 this）
+ * // 无返回：写 returns('void')（省略会让声明层的 fn 门禁拒掉，见 RpcTypes 的声明）
  * const ping = RPC.create('mypack:ping')
  *   .schema({ n: 'int' })
  *   .returns('void')
@@ -53,80 +52,6 @@ import java.util.Map;
  *
  * {@code schema} → {@code returns}（可选）→ {@code fn}，{@code fn} 必须是最后一个。
  */
-@NekoProbe(
-        extra = """
-                /** RPC 支持的类型标签。与 SignalTypes.byName 的 case 一一对应。 */
-                export type SType =
-                    | "bool" | "int" | "long" | "short" | "byte"
-                    | "float" | "double" | "char" | "string"
-                    | "item" | "block" | "fluid" | "entityType" | "blockEntityType"
-                    | "itemStack" | "fluidStack" | "component" | "identifier" | "uuid"
-                    | "blockState" | "blockPos" | "chunkPos" | "aabb" | "tag" | "dyeColor"
-                    /** 无返回。调 .returns('void') 才好过 fn 的门禁 —— 见 fn 的 this。 */
-                    | "void";
-
-                /**
-                 * 标签 → 脚本可传的类型。
-                 *
-                 * <p>用的是 NekoJS 的<b>输入别名</b>（`_` 后缀）而非裸类型：脚本写
-                 * `.schema({ b: 'block' })` 后传的是 `"minecraft:stone"` 这类松散值，
-                 * 而 `$Block_ = $Block | RegistryTypes.Block | $Item | $ItemStack | $NekoId`
-                 * 正是为接受这种写法而生成的。裸 `$Block` 会拒绝字符串。
-                 */
-                export interface STypeMap {
-                    bool: boolean;
-                    int: number;
-                    long: number;
-                    short: number;
-                    byte: number;
-                    float: number;
-                    double: number;
-                    char: string;
-                    string: string;
-                    item: {{ import(net.minecraft.world.item.Item_) }};
-                    block: {{ import(net.minecraft.world.level.block.Block_) }};
-                    fluid: {{ import(net.minecraft.world.level.material.Fluid) }};
-                    entityType: {{ import(net.minecraft.world.entity.EntityType_) }};
-                    blockEntityType: {{ import(net.minecraft.world.level.block.entity.BlockEntityType_) }};
-                    itemStack: {{ import(net.minecraft.world.item.ItemStack_) }};
-                    fluidStack: {{ import(net.neoforged.neoforge.fluids.FluidStack_) }};
-                    component: {{ import(net.minecraft.network.chat.Component_) }};
-                    identifier: {{ import(net.minecraft.resources.Identifier_) }};
-                    uuid: string;
-                    blockState: {{ import(net.minecraft.world.level.block.state.BlockState_) }};
-                    blockPos: {{ import(net.minecraft.core.BlockPos_) }};
-                    chunkPos: {{ import(net.minecraft.world.level.ChunkPos) }};
-                    aabb: {{ import(net.minecraft.world.phys.AABB) }};
-                    tag: {{ import(net.minecraft.tags.TagKey_) }};
-                    dyeColor: {{ import(net.minecraft.world.item.DyeColor_) }};
-                    void: void;
-                }
-
-                export type Of<S extends SType> = STypeMap[S];
-                export type OfReturn<R> = R extends SType ? STypeMap[R] : void;
-                export type ArgsOf<T extends Record<string, SType>> = { [K in keyof T]: Of<T[K]> };
-                """,
-        type = """
-                export class {{ classtype }}<
-                    T extends Record<string, {{ extra.SType }}> = {},
-                    R extends {{ extra.SType }} | undefined = undefined,
-                > {
-                    schema<const S extends { [K in keyof S]: {{ extra.SType }} }>(
-                        this: {{ classtype }},
-                        sch: S,
-                    ): {{ classtype }}<S>;
-
-                    returns<Ret extends {{ extra.SType }}>(
-                        this: {{ classtype }}<T, undefined>,
-                        ret: Ret,
-                    ): {{ classtype }}<T, Ret>;
-
-                    fn(
-                        this: R extends {{ extra.SType }} ? {{ classtype }}<T, R> : never,
-                        impl: (arg: {{ extra.ArgsOf }}<T>) => {{ extra.OfReturn }}<R>,
-                    ): {{ import(com.anningui.nekoldlib.signal.RpcCollector$Entry) }};
-                }
-                """)
 public final class RpcBuilder {
 
     private final String id;
@@ -173,7 +98,7 @@ public final class RpcBuilder {
      */
     public RpcBuilder returns(String typeName) {
         // 'void' = 显式声明无返回。与「不调 returns」等价，但能让声明层的
-        // fn 门禁（this: R extends SType ? ... : never）通过——见 RpcBuilder 的 @NekoProbe。
+        // fn 门禁（this: R extends SType ? ... : never）通过——见 RpcTypes 的声明。
         if ("void".equalsIgnoreCase(typeName)) {
             returnName = null;
             return this;

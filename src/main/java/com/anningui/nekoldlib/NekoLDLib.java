@@ -102,15 +102,16 @@ public class NekoLDLib implements ILDLibPlugin, NekoJSPlugin {
     }
 
     /**
-     * 注册 JSX 类型声明，供编辑器补全与校验。
+     * 注册类型声明，供编辑器补全与校验。
      *
-     * <p>NekoJS 自己的声明里<b>没有</b>任何 JSX 标签类型（{@code JSX.IntrinsicElements}
-     * 是空的），所以这是从 0 到 1 的补充：注入后写 {@code <panel} 就能看到属性提示，
-     * 属性名拼错也会被标出。
+     * <p>两类：JSX 标签声明（NekoJS 自己<b>没有</b>任何 {@code JSX.IntrinsicElements}，
+     * 这是从 0 到 1 的补充），以及 RPC 链式构建器的手写泛型声明（反射表达不了
+     * 「schema 字面量 → 回调形参类型」这层关系，见 {@code RpcTypes}）。
      */
     @Override
     public void registerTypeDocs(com.tkisor.nekojs.core.plugin.TypeDocsRegister registry) {
         com.anningui.nekoldlib.types.JsxTypes.register(registry);
+        com.anningui.nekoldlib.types.RpcTypes.register(registry);
     }
 
     /**

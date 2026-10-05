@@ -57,7 +57,7 @@ public final class JsxTypes {
                 "放行手工构造的 vnode 字面量（{ tag, props, children }）",
                 List.of("UI.render({ tag: 'panel', props: {}, children: [] })")));
 
-        // RPC 的类型不加 typeOverride —— 两条路都堵死，记录在此免得再试一遍。
+        // RPC 的类型不走 typeOverride —— 两条路都堵死，记录在此免得再试一遍。
         //
         // 试过：把 RPC 绑定的类型指到手写的泛型接口，靠泛型推导让 fn(({msg}) => ...) 推出形参。
         // 不可行——NekoJS 的 BindingDeclarationGenerator 会**无条件**生成
@@ -70,11 +70,8 @@ public final class JsxTypes {
         // 改 `interface` 增强 $RpcBuilder 也不行：实测原 class 的旧重载
         // 与新加的泛型重载并存时，TS 选前者，推导失效。
         //
-        // 现状：RpcBuilder 走 `.schema({...}).returns('...').fn(({k}) => ...)`，
-        // 键名与类型标签都是字面量，声明层可用类型体操推导（见 RpcBuilder 类注释）。
-        // 但**这依赖 NekoJS 生成的声明也说人话** —— `schema(Map<String,String>)` 反射出来
-        // 只是 `$Map`，推不出键值。等 @NekoProbe 注解落地后由注解提供手写泛型声明接管。
-        // 在那之前，脚本侧的 `{msg}` 仍是 any，但 API 形状已就位。
+        // 已解决：改走**生成端**替换类声明（NekoJS 的 ClassDeclarationCatalogEntry），
+        // RpcBuilder / RpcCollector.Entry 的声明整体由 RpcTypes 手写，绕开上述两条限制。
 
         NekoLDLib.LOGGER.info("[NekoLDLib] 已注册 JSX 类型声明（{} 个标签）",
                 NekoLDLib.elements().knownTags().size());
